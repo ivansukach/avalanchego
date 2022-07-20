@@ -5,6 +5,7 @@ package proposervm
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/ava-labs/avalanchego/database"
@@ -128,6 +129,7 @@ func (vm *VM) Initialize(
 	vm.context = context
 	vm.onShutdown = cancel
 
+	log.Println("ChainVM initialization through proposer vm")
 	err := vm.ChainVM.Initialize(
 		ctx,
 		dbManager,

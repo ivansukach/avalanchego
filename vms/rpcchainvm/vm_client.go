@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/hashicorp/go-plugin"
@@ -138,7 +139,9 @@ func (vm *VMClient) Initialize(
 	// initialize request parameters
 	versionedDBs := dbManager.GetDatabases()
 	versionedDBServers := make([]*vmpb.VersionedDBServer, len(versionedDBs))
+	log.Printf("RPC_CHAIN_VM VM_CLIENT Initialize: versionedDBs: %+v\n", versionedDBs)
 	for i, semDB := range versionedDBs {
+		log.Printf("DB[%d] TYPE: %T\n", i, semDB)
 		db := rpcdb.NewServer(semDB.Database)
 		dbVersion := semDB.Version.String()
 		serverListener, err := grpcutils.NewListener()

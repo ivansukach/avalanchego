@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"google.golang.org/grpc"
@@ -46,9 +48,9 @@ import (
 )
 
 var (
-	versionParser = version.NewDefaultApplicationParser()
-
-	_ vmpb.VMServer = &VMServer{}
+	versionParser               = version.NewDefaultApplicationParser()
+	logsDirPath                 = fmt.Sprintf("%s/.landslidevm/avalanchego/logs", os.Getenv("HOME"))
+	_             vmpb.VMServer = &VMServer{}
 )
 
 // VMServer is a VM that is managed over RPC.
@@ -71,67 +73,89 @@ func NewServer(vm block.ChainVM) *VMServer {
 }
 
 func (vm *VMServer) Initialize(_ context.Context, req *vmpb.InitializeRequest) (*vmpb.InitializeResponse, error) {
+	f, err := os.OpenFile(fmt.Sprintf("%s/vm-%d.log", logsDirPath, time.Now().Unix()),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Println(err)
+	}
+	defer f.Close()
+
+	logger := log.New(f, "VMServer Initialize: ", log.LstdFlags)
+	logger.Println("Start initializing Landslide VM through VMServer")
 	subnetID, err := ids.ToID(req.SubnetId)
 	if err != nil {
 		return nil, err
 	}
+	logger.Printf("Subnet ID: %+v\n", subnetID)
 	chainID, err := ids.ToID(req.ChainId)
 	if err != nil {
 		return nil, err
 	}
+	logger.Printf("Chain ID: %+v\n", chainID)
 	nodeID, err := ids.ToShortID(req.NodeId)
 	if err != nil {
 		return nil, err
 	}
+	logger.Printf("Node ID: %+v\n", subnetID)
 	xChainID, err := ids.ToID(req.XChainId)
 	if err != nil {
 		return nil, err
 	}
+	logger.Printf("xChainID: %+v\n", xChainID)
 	avaxAssetID, err := ids.ToID(req.AvaxAssetId)
 	if err != nil {
 		return nil, err
 	}
-
+	logger.Printf("avaxAssetID: %+v\n", avaxAssetID)
 	// Dial each database in the request and construct the database manager
 	versionedDBs := make([]*manager.VersionedDatabase, len(req.DbServers))
 	versionParser := version.NewDefaultParser()
+	logger.Println("Version parser has been successfully built")
 	for i, vDBReq := range req.DbServers {
 		version, err := versionParser.Parse(vDBReq.Version)
+		logger.Printf("Iteration: %d; vDBReq version: %+v\n", i, vDBReq.Version)
 		if err != nil {
 			// Ignore closing errors to return the original error
 			_ = vm.connCloser.Close()
 			return nil, err
 		}
 
+		logger.Printf("Iteration: %d; vDBReq ServerAddr: %+v\n", i, vDBReq.ServerAddr)
 		clientConn, err := grpcutils.Dial(vDBReq.ServerAddr)
 		if err != nil {
 			// Ignore closing errors to return the original error
 			_ = vm.connCloser.Close()
 			return nil, err
 		}
+		logger.Println("Add client connection to connection closer: interation: ", i)
 		vm.connCloser.Add(clientConn)
+		logger.Println("Create RPC DB client: interation: ", i)
 		db := rpcdb.NewClient(rpcdbpb.NewDatabaseClient(clientConn))
 		versionedDBs[i] = &manager.VersionedDatabase{
 			Database: corruptabledb.New(db),
 			Version:  version,
 		}
 	}
+	logger.Println("Create DB manager from DBs")
 	dbManager, err := manager.NewManagerFromDBs(versionedDBs)
 	if err != nil {
 		// Ignore closing errors to return the original error
 		_ = vm.connCloser.Close()
+		logger.Printf("Error: %w", err)
 		return nil, err
 	}
-
+	logger.Println("Create GRPC client connection to req.ServerAddr")
 	clientConn, err := grpcutils.Dial(req.ServerAddr)
 	if err != nil {
 		// Ignore closing errors to return the original error
 		_ = vm.connCloser.Close()
+		logger.Printf("Error: %w", err)
 		return nil, err
 	}
-
+	logger.Println("Add client connection to connection closer")
 	vm.connCloser.Add(clientConn)
 
+	logger.Println("Create clients with client connection")
 	msgClient := messenger.NewClient(messengerpb.NewMessengerClient(clientConn))
 	keystoreClient := gkeystore.NewClient(keystorepb.NewKeystoreClient(clientConn))
 	sharedMemoryClient := gsharedmemory.NewClient(sharedmemorypb.NewSharedMemoryClient(clientConn))
@@ -139,6 +163,7 @@ func (vm *VMServer) Initialize(_ context.Context, req *vmpb.InitializeRequest) (
 	snLookupClient := gsubnetlookup.NewClient(subnetlookuppb.NewSubnetLookupClient(clientConn))
 	appSenderClient := appsender.NewClient(appsenderpb.NewAppSenderClient(clientConn))
 
+	logger.Println("Make toEngine and closed channels")
 	toEngine := make(chan common.Message, 1)
 	vm.closed = make(chan struct{})
 	go func() {
@@ -148,6 +173,7 @@ func (vm *VMServer) Initialize(_ context.Context, req *vmpb.InitializeRequest) (
 				if !ok {
 					return
 				}
+				logger.Println("Get msg through toEngine channel")
 				// Nothing to do with the error within the goroutine
 				_ = msgClient.Notify(msg)
 			case <-vm.closed:
@@ -156,6 +182,7 @@ func (vm *VMServer) Initialize(_ context.Context, req *vmpb.InitializeRequest) (
 		}
 	}()
 
+	logger.Println("Set vm ctx")
 	vm.ctx = &snow.Context{
 		NetworkID: req.NetworkId,
 		SubnetID:  subnetID,
@@ -175,32 +202,41 @@ func (vm *VMServer) Initialize(_ context.Context, req *vmpb.InitializeRequest) (
 		// TODO: support snowman++ fields
 	}
 
+	logger.Println("ChainVM self initialization")
 	if err := vm.vm.Initialize(vm.ctx, dbManager, req.GenesisBytes, req.UpgradeBytes, req.ConfigBytes, toEngine, nil, appSenderClient); err != nil {
 		// Ignore errors closing resources to return the original error
+		logger.Printf("Error occurred during landslide vm initialization: %w \n", err)
 		_ = vm.connCloser.Close()
 		close(vm.closed)
 		return nil, err
 	}
-
+	logger.Println("Get last accepted block id")
 	lastAccepted, err := vm.vm.LastAccepted()
 	if err != nil {
 		// Ignore errors closing resources to return the original error
+		logger.Printf("Error occurred during attempt to get last accepted block id: %w \n", err)
 		_ = vm.vm.Shutdown()
 		_ = vm.connCloser.Close()
 		close(vm.closed)
 		return nil, err
 	}
-
+	logger.Println("Get last accepted block")
 	blk, err := vm.vm.GetBlock(lastAccepted)
 	if err != nil {
 		// Ignore errors closing resources to return the original error
+		logger.Printf("Error occurred during attempt to get last accepted block: %w \n", err)
 		_ = vm.vm.Shutdown()
 		_ = vm.connCloser.Close()
 		close(vm.closed)
 		return nil, err
 	}
+	logger.Println("Get last accepted block parent id")
 	parentID := blk.Parent()
+	logger.Println("Get last accepted block timestamp bytes")
 	timeBytes, err := blk.Timestamp().MarshalBinary()
+	if err != nil {
+		logger.Printf("Error during blk.Timestamp().MarshalBinary(): %w \n", err)
+	}
 	return &vmpb.InitializeResponse{
 		LastAcceptedId:       lastAccepted[:],
 		LastAcceptedParentId: parentID[:],

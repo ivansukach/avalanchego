@@ -83,13 +83,17 @@ func (p *process) Start() error {
 
 	// start the db manager
 	var dbManager manager.Manager
+	log.Info("DATABASE CONFIG NAME: ", p.config.DatabaseConfig.Name)
 	switch p.config.DatabaseConfig.Name {
 	case rocksdb.Name:
+		log.Info("Create new rocks db")
 		path := filepath.Join(p.config.DatabaseConfig.Path, rocksdb.Name)
 		dbManager, err = manager.NewRocksDB(path, p.config.DatabaseConfig.Config, log, version.CurrentDatabase)
 	case leveldb.Name:
+		log.Info("Create new level db")
 		dbManager, err = manager.NewLevelDB(p.config.DatabaseConfig.Path, p.config.DatabaseConfig.Config, log, version.CurrentDatabase)
 	case memdb.Name:
+		log.Info("Create new mem db")
 		dbManager = manager.NewMemDB(version.CurrentDatabase)
 	default:
 		err = fmt.Errorf(
